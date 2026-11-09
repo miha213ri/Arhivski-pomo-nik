@@ -1,0 +1,1 @@
+"""Funkcionalni sklopi glavne aplikacije."""
