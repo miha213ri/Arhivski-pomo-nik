@@ -6,13 +6,15 @@ from ..dialogs import ApiLimitsDialog, SettingsDialog, PromptDialog
 
 class TranscriptionMixin:
     def build_ai_tab(self):
-        dir_frame = tk.LabelFrame(self.tab_ai, text=" 1. Izberi mapo s prenesenimi slikami ", font=("Arial", 10, "bold"))
+        dir_frame = tk.LabelFrame(self.tab_ai, text=" 1. Izberi mape s prenesenimi slikami (več vnosov loči z novo vrstico) ", font=("Arial", 10, "bold"))
         dir_frame.pack(padx=10, pady=10, fill="x")
         dir_sub = tk.Frame(dir_frame)
         dir_sub.pack(padx=10, pady=10, fill="x")
-        self.ai_ent_dir = tk.Entry(dir_sub, font=("Arial", 10))
+        
+        self.ai_ent_dir = tk.Text(dir_sub, font=("Arial", 10), height=3)
         self.ai_ent_dir.pack(side=tk.LEFT, fill="x", expand=True, padx=(0, 5))
-        tk.Button(dir_sub, text="Brskaj...", command=lambda: self.browse_directory(self.ai_ent_dir), width=10).pack(side=tk.RIGHT)
+        
+        tk.Button(dir_sub, text="Brskaj...", command=self.add_directory_to_ai_text, width=10).pack(side=tk.RIGHT)
 
         opt_frame = tk.Frame(self.tab_ai)
         opt_frame.pack(padx=10, pady=5, fill="x")
@@ -54,6 +56,15 @@ class TranscriptionMixin:
 
         self.ai_txt_log = scrolledtext.ScrolledText(self.tab_ai, width=70, height=8, font=("Consolas", 9))
         self.ai_txt_log.pack(padx=10, pady=5, fill="both", expand=True)
+        
+    def add_directory_to_ai_text(self):
+        dir_path = filedialog.askdirectory()
+        if dir_path:
+            current_text = self.ai_ent_dir.get("1.0", tk.END)
+            if current_text.strip():
+                self.ai_ent_dir.insert(tk.END, "\n" + dir_path)
+            else:
+                self.ai_ent_dir.insert(tk.END, dir_path)
 
     def open_limits_dialog(self):
         settings = load_settings()
@@ -85,16 +96,37 @@ class TranscriptionMixin:
         self.ai_ui_update(log="\n[!] Uporabnik je prekinil transkripcijo...", api="Prekinjeno")
 
     def start_ai(self):
-        target_dir = self.ai_ent_dir.get().strip()
+        target_dirs_raw = self.ai_ent_dir.get("1.0", tk.END).strip().split('\n')
+        target_dirs = [d.strip() for d in target_dirs_raw if d.strip()]
+        
         settings = load_settings()
         provider = settings.get("active_provider", "Gemini")
-        if not target_dir or not os.path.exists(target_dir): return messagebox.showerror("Napaka", "Neveljavna mapa!")
         
+        if not target_dirs: 
+            return messagebox.showerror("Napaka", "Vnesite vsaj eno mapo!")
+            
+        valid_dirs = []
+        for d in target_dirs:
+            if os.path.exists(d): valid_dirs.append(d)
+            else: self.ai_log(f"[!] Mapa ne obstaja in bo preskočena: {d}")
+            
+        if not valid_dirs:
+             return messagebox.showerror("Napaka", "Nobena od vnesenih map ne obstaja!")
+
         self.ai_cancel_event.clear()
         self.ai_btn_start.config(state=tk.DISABLED, text="Obdelujem...")
         self.ai_btn_cancel.config(state=tk.NORMAL)
         
-        threading.Thread(target=self.ai_worker, args=(target_dir, self.ai_ent_range.get().strip(), provider, settings), daemon=True).start()
+        threading.Thread(target=self._ai_worker_multi, args=(valid_dirs, self.ai_ent_range.get().strip(), provider, settings), daemon=True).start()
+
+    def _ai_worker_multi(self, target_dirs, page_range_str, provider, settings):
+        for idx, target_dir in enumerate(target_dirs):
+            if self.ai_cancel_event.is_set(): break
+            self.ai_ui_update(log=f"\n=========================================\n[*] Začenjam sklop {idx+1}/{len(target_dirs)}: {target_dir}\n=========================================")
+            self.ai_worker(target_dir, page_range_str, provider, settings)
+            
+        if not self.ai_cancel_event.is_set():
+             self.ai_ui_update(log="\n[✔] Vse naloge končane!", api="Zaključeno")
 
     def ai_worker(self, target_dir, page_range_str, provider, settings):
         api_key = settings.get(provider, {}).get("api_key", "")
@@ -107,7 +139,6 @@ class TranscriptionMixin:
         self.api_ledger._calculate_current_usage()
 
         try:
-            # 1. POIŠČI VSE PODMAPE, KI VSEBUJEJO SLIKE (.jpg)
             dirs_to_process = []
             for root_path, dirs, files in os.walk(target_dir):
                 if any(f.lower().endswith(".jpg") for f in files):
@@ -117,7 +148,6 @@ class TranscriptionMixin:
                 self.ai_ui_update(log="[!] V izbrani mapi in njenih podmapah ni bilo najdenih .jpg slik.")
                 return
 
-            # Izračunamo skupno število slik za celoten progress bar
             all_valid_files = []
             allowed_pages = parse_page_range(page_range_str)
             for d in dirs_to_process:
@@ -130,13 +160,11 @@ class TranscriptionMixin:
 
             global_idx = 0
 
-            # 2. OBDELAVA VSAKE POSAMEZNE MAPE
             for current_book_dir in dirs_to_process:
                 if self.ai_cancel_event.is_set(): break
                 
-                # Preberemo metapodatke iz _source.txt za trenutno mapo
                 source_path = os.path.join(current_book_dir, "_source.txt")
-                book_type = "KRSTNE" # Default
+                book_type = "KRSTNE"
                 if os.path.exists(source_path):
                     with open(source_path, "r", encoding="utf-8") as f:
                         for line in f:
@@ -148,9 +176,6 @@ class TranscriptionMixin:
                 
                 self.ai_ui_update(log=f"\n[*] Prehajam v mapo: {os.path.basename(current_book_dir)}")
                 self.ai_ui_update(log=f"[*] Detektiran tip knjige: {book_type}. Nastavljam prompt...")
-                # Vsaka vrsta knjige ima svoj JSON-shema prompt.
-                # Fallback določimo ločeno, da Python ne išče ključa "KRSTNE"
-                # že med vrednotenjem privzetega argumenta metode dict.get().
                 schema_prompt = PROMPT_JSON_SCHEMAS.get(book_type)
                 if not schema_prompt:
                     self.ai_ui_update(log=(
@@ -165,7 +190,6 @@ class TranscriptionMixin:
                     )
                 ai_prompt = load_prompt() + schema_prompt
 
-                # Filtriramo slike za to mapo (obseg strani)
                 files = sorted(f for f in os.listdir(current_book_dir) if f.lower().endswith(".jpg"))
                 valid_files = [f for f in files if not allowed_pages or (re.search(r"_(\d+)\.jpg$", f) and int(re.search(r"_(\d+)\.jpg$", f).group(1)) in allowed_pages)]
                 
@@ -205,6 +229,9 @@ class TranscriptionMixin:
                             success, res_txt, in_tok, out_tok = self.call_openai(api_key, model_name, img_path, ai_prompt)
                         elif provider == "Anthropic":
                             success, res_txt, in_tok, out_tok = self.call_anthropic(api_key, model_name, img_path, ai_prompt)
+                        elif provider == "CustomAPI":
+                            base_url = settings.get("CustomAPI", {}).get("base_url", "https://api.groq.com/openai/v1/chat/completions")
+                            success, res_txt, in_tok, out_tok = self.call_custom_openai(api_key, model_name, base_url, img_path, ai_prompt)
                         else:
                             success, res_txt, in_tok, out_tok = self.call_gemini(api_key, model_name, img_path, ai_prompt)
                     except Exception as api_err:
@@ -213,9 +240,8 @@ class TranscriptionMixin:
 
                     if self.ai_cancel_event.is_set(): break
 
-                    # Validacija JSON strukture pred shranjevanjem
                     if success and res_txt:
-                        expected_keys = [c[0] for c in SCHEMA_FIELDS[book_type] if c[0] not in ('zupnija', 'knjiga', 'slika')]
+                        expected_keys = [c[0] for c in SCHEMA_FIELDS[book_type] if c[0] not in ('zupnija', 'knjiga', 'slika', 'vpis_st_knjige', 'vpis_st_na_strani')]
                         is_valid, err_msg = is_valid_json_schema(res_txt, expected_keys)
                         if not is_valid:
                             success = False
@@ -252,6 +278,13 @@ class TranscriptionMixin:
 
     def _encode_img(self, path):
         with open(path, "rb") as f: return base64.b64encode(f.read()).decode("utf-8")
+        
+    def call_custom_openai(self, api_key, model_name, base_url, img_path, prompt):
+        try: img_b64 = self._encode_img(img_path)
+        except Exception as e: return False, str(e), 0, 0
+        payload = {"model": model_name, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]}], "max_tokens": 8192}
+        req = urllib.request.Request(base_url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}, method="POST")
+        return self.execute_api_request("OpenAI", req) # Ponovno uporabimo OpenAI parser, saj si vsi delijo standard
 
     def call_gemini(self, api_key, model_name, img_path, prompt):
         try: img_b64 = self._encode_img(img_path)
@@ -290,7 +323,6 @@ class TranscriptionMixin:
                         c = res_data.get("candidates", [])
                         if c:
                             parts = [p.get("text", "") for p in c[0].get("content", {}).get("parts", []) if p.get("text")]
-                            # Gemini lahko konča z max_tokens, kar pomeni odrezan tekst
                             if c[0].get("finishReason") == "MAX_TOKENS":
                                 return False, "Besedilo je bilo odrezano (MAX_TOKENS)", in_t, out_t
                             return True, "\n".join(parts), in_t, out_t

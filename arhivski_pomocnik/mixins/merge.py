@@ -34,7 +34,6 @@ class MergeMixin:
 
         ttk.Button(frame_merge_bottom, text="Združi izbrane datoteke v mega Excel", command=self.start_execute_merge_files, width=45).grid(row=1, column=0, columnspan=3, pady=15)
 
-        # DODANO: Progress bar za združevanje datotek
         self.merge_progress = ttk.Progressbar(frame_merge_bottom, orient="horizontal", mode="determinate")
         self.merge_progress.grid(row=2, column=0, columnspan=3, sticky="we", padx=5, pady=(0, 5))
 
@@ -61,25 +60,27 @@ class MergeMixin:
             self.root.after(0, lambda: messagebox.showwarning("Opozorilo", "Najprej izberi datoteke!"))
             return
         
-        data_by_type = {"KRSTNE": [], "POROCNE": [], "KNJIGE_MRTVIH": []}
-        seen_keys = {"KRSTNE": set(), "POROCNE": set(), "KNJIGE_MRTVIH": set()}
+        data_by_sheet = {}
         
         for file_path in self.merge_files_list:
             try:
                 wb = openpyxl.load_workbook(file_path)
-                for b_type in ["KRSTNE", "POROCNE", "KNJIGE_MRTVIH"]:
-                    if b_type in wb.sheetnames:
-                        ws = wb[b_type]
-                        header = []
-                        for i, row in enumerate(ws.iter_rows(values_only=True)):
-                            if i == 0:
-                                header = [str(c) if c else "" for c in row]
-                                continue
-                            row_dict = {header[j]: (val if val is not None else "") for j, val in enumerate(row)}
-                            unique_key = (str(row_dict.get("župnija", "")), str(row_dict.get("knjiga", "")), str(row_dict.get("slika", "")), str(row_dict.get("zp. št.", "")))
-                            if unique_key not in seen_keys[b_type] or unique_key == ("", "", "", ""):
-                                seen_keys[b_type].add(unique_key)
-                                data_by_type[b_type].append(row_dict)
+                for sheet_name in wb.sheetnames:
+                    if sheet_name == "Statistika priimkov" or sheet_name == "Info":
+                        continue
+                    
+                    if sheet_name not in data_by_sheet:
+                        data_by_sheet[sheet_name] = {"headers": [], "rows": []}
+                    
+                    ws = wb[sheet_name]
+                    for i, row in enumerate(ws.iter_rows(values_only=True)):
+                        if i == 0:
+                            if not data_by_sheet[sheet_name]["headers"]:
+                                data_by_sheet[sheet_name]["headers"] = [str(c) if c else "" for c in row]
+                            continue
+                        
+                        data_by_sheet[sheet_name]["rows"].append(row)
+
             except Exception as e:
                 self.root.after(0, lambda f=file_path, e=e: messagebox.showerror("Napaka", f"Napaka pri branju datoteke {os.path.basename(f)}:\n{e}"))
                 return
@@ -91,18 +92,23 @@ class MergeMixin:
             
             all_rows_for_stats = []
             total = 0
-            for b_type, cols in EXCEL_COLUMNS.items():
-                if data_by_type[b_type]:
-                    ws = wb_out.create_sheet(title=b_type)
-                    ws.append(cols)
-                    for row in data_by_type[b_type]:
-                        ws.append([row.get(col, "") for col in cols])
-                        all_rows_for_stats.append(row)
+            
+            for sheet_name, sheet_data in data_by_sheet.items():
+                if sheet_data["rows"]:
+                    ws = wb_out.create_sheet(title=sheet_name)
+                    headers = sheet_data["headers"]
+                    ws.append(headers)
+                    
+                    for row in sheet_data["rows"]:
+                        ws.append(row)
+                        
+                        row_dict = {headers[j]: (val if val is not None else "") for j, val in enumerate(row) if j < len(headers)}
+                        all_rows_for_stats.append(row_dict)
                         total += 1
                         
             self.update_surname_statistics(all_rows_for_stats, wb_out)
             
             wb_out.save(output_file)
-            self.root.after(0, lambda: messagebox.showinfo("Uspeh", f"Uspešno združenih {total} zapisov (izločeni dvojniki)!\nShranjeno v:\n{output_file}"))
+            self.root.after(0, lambda: messagebox.showinfo("Uspeh", f"Uspešno združenih {total} zapisov (VSI ZAPISI - BREZ IZLOČANJA)!\nShranjeno v:\n{output_file}"))
         except Exception as e: 
             self.root.after(0, lambda e=e: messagebox.showerror("Napaka", f"Napaka shranjevanja: {e}"))

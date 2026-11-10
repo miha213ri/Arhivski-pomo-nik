@@ -30,7 +30,6 @@ def secure_encrypt(data: str) -> str:
             crypt32.LocalFree(blob_out.pbData)
             return "DPAPI:" + base64.b64encode(encrypted).decode('utf-8')
     except Exception: pass
-    # Fallback na base64, če DPAPI ni na voljo (npr. ne-Windows)
     return "B64:" + base64.b64encode(data.encode('utf-8')).decode('utf-8')
 
 def secure_decrypt(data: str) -> str:
@@ -50,7 +49,7 @@ def secure_decrypt(data: str) -> str:
         try:
             return base64.b64decode(data[4:]).decode('utf-8')
         except: pass
-    return data # Vrni surovo, če ni prepoznanega prefiksa (združljivost nazaj)
+    return data 
 
 def sanitize_name(name):
     return re.sub(r'[\\/*?:"<>|]', "", str(name)).strip().replace(" ", "-") or "Neznano"
@@ -61,7 +60,6 @@ def decode_urlsafe_base64(data: str) -> str:
     return base64.b64decode(data).decode("utf-8")
 
 def is_valid_jpeg(path):
-    # Bolj robustno preverjanje konca in začetka slike
     try:
         if not os.path.exists(path) or os.path.getsize(path) < 100: return False
         with open(path, "rb") as f: 
@@ -166,21 +164,59 @@ def get_book_metadata_and_urls(base_detail_url):
     else: parish_raw, book_id = "Neznana-Cerkev", "Knjiga"
 
     parish_name = sanitize_name(parish_raw)
+    
+    # Odstranjevanje vodilnih ničel
     book_signature = sanitize_name(book_id)
+    book_signature = book_signature.lstrip('0') or "0"
 
-    # POPRAVEK: Očistimo HTML značke, preden iščemo letnice, da se izognemo napakam ob spremembi portala
-    clean_html = re.sub(r'<[^>]+>', ' ', html)
     years = None
-    year_match = re.search(r"(1[4-9]\d{2})\s*[-–—]\s*(1[4-9]\d{2})", clean_html)
-    if year_match: years = f"{year_match.group(1)}-{year_match.group(2)}"
+    if unique_image_urls:
+        first_url = unique_image_urls[0]
+        unquoted_url = urllib.parse.unquote(first_url)
+        filename_part = unquoted_url.split("/")[-1]
+        
+        # POPRAVEK REGEX-a: zdaj išče obliko "1833-1864" brez pogojevanja s presledki!
+        img_range_match = re.search(r'(\d{4})\s*[-–—]\s*(\d{4})', filename_part)
+        if img_range_match:
+            years = f"{img_range_match.group(1)}-{img_range_match.group(2)}"
+        else:
+            img_single_match = re.findall(r'\b([12]\d{3})\b', filename_part)
+            img_candidates = [c for c in img_single_match if c != book_id and not c.startswith('0')]
+            if img_candidates:
+                years = img_candidates[-1]
+    
+    if not years:
+        title_match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title_text = title_match.group(1).strip()
+            range_match = re.search(r'(\d{4})\s*[-–—]\s*(\d{4})', title_text)
+            if range_match:
+                years = f"{range_match.group(1)}-{range_match.group(2)}"
+            else:
+                candidates = re.findall(r'\b([12]\d{3})\b', title_text)
+                candidates = [c for c in candidates if c != book_id and not c.startswith('0')]
+                if candidates:
+                    years = candidates[-1]
+                    
+    if not years:
+        clean_html = re.sub(r'<[^>]+>', ' ', html)
+        range_m = re.search(r'(\d{4})\s*[-–—]\s*(\d{4})', clean_html)
+        if range_m:
+            years = f"{range_m.group(1)}-{range_m.group(2)}"
+        else:
+            single_m = re.search(r"(" + re.escape(book_id) + r".{1,30}?)\b([12]\d{3})\b", clean_html)
+            if single_m:
+                years = single_m.group(2)
 
-    book_folder = f"{book_signature}_{years}" if years else book_signature
     html_lower = html.lower()
     types = []
     if re.search(r"(tauf|krst|bapt)", html_lower): types.append("KRSTNE")
     if re.search(r"(trauung|poro[cč]|copul|marri)", html_lower): types.append("POROCNE")
     if re.search(r"(sterb|mrl|mrtv|defunct|smrt|death)", html_lower): types.append("KNJIGE_MRTVIH")
     book_category = "_".join(types) if types else "OSTALE_KNJIGE"
+
+    base_folder_name = f"{book_signature}_{years}" if years else book_signature
+    book_folder = f"[{book_category}] {base_folder_name}"
 
     return parish_name, book_category, book_folder, unique_image_urls
 
@@ -191,6 +227,7 @@ def load_settings():
         "Gemini": {"api_key": "", "model": "gemini-1.5-flash", "limits": dict(API_LIMIT_PRESETS["NORMALNO"]), "profile": "NORMALNO"},
         "OpenAI": {"api_key": "", "model": "gpt-4o-mini", "limits": dict(API_LIMIT_PRESETS["NORMALNO"]), "profile": "NORMALNO"},
         "Anthropic": {"api_key": "", "model": "claude-3-5-sonnet-20241022", "limits": dict(API_LIMIT_PRESETS["NORMALNO"]), "profile": "NORMALNO"},
+        "CustomAPI": {"api_key": "", "model": "llama-3.2-90b-vision-preview", "base_url": "https://api.groq.com/openai/v1/chat/completions", "limits": dict(API_LIMIT_PRESETS["NORMALNO"]), "profile": "NORMALNO"},
         "DownloadSettings": dict(DL_PRESETS["POČASI"]),
         "LiveDB": {"host": "localhost", "user": "root", "password": "", "database": "maticne_knjige_db", "port": 3306}
     }
@@ -209,7 +246,7 @@ def load_settings():
                             default_settings[k] = v
         except: pass
         
-    for prov in ["Gemini", "OpenAI", "Anthropic"]:
+    for prov in ["Gemini", "OpenAI", "Anthropic", "CustomAPI"]:
         if "limits" not in default_settings[prov]:
             default_settings[prov]["limits"] = dict(API_LIMIT_PRESETS["NORMALNO"])
         if "profile" not in default_settings[prov]:
@@ -224,16 +261,15 @@ def load_settings():
 
 def save_settings(settings_dict):
     try:
-        # Priprava kopije za shranjevanje z enkripcijo
         save_data = json.loads(json.dumps(settings_dict))
-        for prov in ["Gemini", "OpenAI", "Anthropic"]:
-            if "api_key" in save_data[prov]:
+        for prov in ["Gemini", "OpenAI", "Anthropic", "CustomAPI"]:
+            if prov in save_data and "api_key" in save_data[prov]:
                 save_data[prov]["api_key"] = secure_encrypt(save_data[prov]["api_key"])
         if "LiveDB" in save_data and "password" in save_data["LiveDB"]:
             save_data["LiveDB"]["password"] = secure_encrypt(save_data["LiveDB"]["password"])
             
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(save_data, f, indent=4)
+        json_str = json.dumps(save_data, indent=4)
+        write_text_atomic(SETTINGS_FILE, json_str)
         return True
     except Exception as e:
         messagebox.showerror("Napaka", f"Nastavitev ni bilo mogoče shraniti:\n{e}")
@@ -271,14 +307,7 @@ def is_valid_json_schema(text, required_keys):
     except json.JSONDecodeError as e:
         return False, f"Sintaktična napaka v JSON: {str(e)}"
 
-
 def parse_page_range(value, total_pages=None):
-    """Pretvori vnos obsega strani (npr. '5' ali '10-13') v urejen seznam.
-
-    Prazen vnos vrne prazen seznam, kar pomeni obdelavo vseh strani.
-    Podprti so tudi večji razponi, ločeni z vejico ali podpičjem (npr. 1-3, 7, 9-10).
-    Če je podan total_pages, preveri, da so vse strani znotraj dejanskega obsega knjige.
-    """
     text = str(value or '').strip()
     if not text:
         return []
@@ -290,9 +319,7 @@ def parse_page_range(value, total_pages=None):
             continue
         match = re.fullmatch(r'(\d+)(?:\s*[-–]\s*(\d+))?', token)
         if not match:
-            raise ValueError(
-                f"Nepravilen obseg strani: '{token}'. Uporabi npr. 5, 10-13 ali 1-3, 7."
-            )
+            raise ValueError(f"Nepravilen obseg strani: '{token}'. Uporabi npr. 5, 10-13 ali 1-3, 7.")
         start = int(match.group(1))
         end = int(match.group(2) or start)
         if start < 1 or end < 1:
@@ -305,6 +332,4 @@ def parse_page_range(value, total_pages=None):
 
     return sorted(selected)
 
-
-# Enoten obravnavalnik nepričakovanih napak ob uvozu/zagonu programa.
 sys.excepthook = log_startup_error

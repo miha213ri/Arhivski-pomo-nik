@@ -19,7 +19,7 @@ class ApiLimitsDialog(tk.Toplevel):
         frame_top = tk.Frame(self)
         frame_top.pack(padx=20, fill="x", pady=5)
         tk.Label(frame_top, text="Ponudnik:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", pady=5)
-        self.cb_provider = ttk.Combobox(frame_top, values=["Gemini", "OpenAI", "Anthropic"], state="readonly", width=25)
+        self.cb_provider = ttk.Combobox(frame_top, values=["Gemini", "OpenAI", "Anthropic", "CustomAPI"], state="readonly", width=25)
         self.cb_provider.grid(row=0, column=1, padx=10, pady=5)
         self.cb_provider.set(self.settings.get("active_provider", "Gemini"))
         self.cb_provider.bind("<<ComboboxSelected>>", self.on_provider_change)
@@ -81,11 +81,12 @@ class ApiLimitsDialog(tk.Toplevel):
         self.on_save(self.settings)
         self.destroy()
 
+
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, on_save_callback=None):
         super().__init__(parent)
         self.title("Nastavitve AI API (Ključi)")
-        self.geometry("480x280")
+        self.geometry("490x320")
         self.resizable(False, False)
         self.grab_set() 
         self.on_save_callback = on_save_callback
@@ -95,8 +96,9 @@ class SettingsDialog(tk.Toplevel):
         frame_inputs = tk.Frame(self)
         frame_inputs.pack(padx=20, fill="x", pady=20)
         tk.Label(frame_inputs, text="Ponudnik AI:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="e", pady=10, padx=5)
-        self.cb_provider = ttk.Combobox(frame_inputs, values=["Gemini", "OpenAI", "Anthropic"], state="readonly", width=37)
-        self.cb_provider.grid(row=0, column=1, pady=10, sticky="w")
+        # DODANO: CustomAPI (Po meri)
+        self.cb_provider = ttk.Combobox(frame_inputs, values=["Gemini", "OpenAI", "Anthropic", "CustomAPI"], state="readonly", width=37)
+        self.cb_provider.grid(row=0, column=1, pady=10, sticky="w", columnspan=2)
         self.cb_provider.set(self.current_provider)
         self.cb_provider.bind("<<ComboboxSelected>>", self.on_provider_change)
 
@@ -111,18 +113,35 @@ class SettingsDialog(tk.Toplevel):
         self.btn_refresh = tk.Button(frame_inputs, text="🔄 Osveži", font=("Arial", 8), command=self.refresh_models)
         self.btn_refresh.grid(row=2, column=2, padx=5)
 
+        # DODANO: Vnos za Base URL (Groq, DeepSeek, itd.)
+        tk.Label(frame_inputs, text="Base URL (za Custom):", font=("Arial", 9, "bold")).grid(row=3, column=0, sticky="e", pady=5, padx=5)
+        self.ent_url = tk.Entry(frame_inputs, width=40)
+        self.ent_url.grid(row=3, column=1, columnspan=2, pady=5, sticky="w")
+
         self.update_ui_for_provider(self.current_provider)
-        tk.Button(self, text="Shrani nastavitve", bg="#2196F3", fg="white", font=("Arial", 10, "bold"), command=self.save_and_close).pack(pady=20)
+        tk.Button(self, text="Shrani nastavitve", bg="#2196F3", fg="white", font=("Arial", 10, "bold"), command=self.save_and_close).pack(pady=10)
 
     def update_ui_for_provider(self, prov):
         self.ent_key.delete(0, tk.END)
         self.ent_key.insert(0, self.settings[prov].get("api_key", ""))
+        
         self.cb_model.set(self.settings[prov].get("model", ""))
+        
+        self.ent_url.delete(0, tk.END)
+        if prov == "CustomAPI":
+            self.ent_url.insert(0, self.settings[prov].get("base_url", "https://api.groq.com/openai/v1/chat/completions"))
+            self.ent_url.config(state=tk.NORMAL)
+        else:
+            self.ent_url.insert(0, "Ni na voljo za tega ponudnika")
+            self.ent_url.config(state=tk.DISABLED)
 
     def on_provider_change(self, event):
         old_prov = self.current_provider
         self.settings[old_prov]["api_key"] = self.ent_key.get().strip()
         self.settings[old_prov]["model"] = self.cb_model.get().strip()
+        if old_prov == "CustomAPI":
+            self.settings[old_prov]["base_url"] = self.ent_url.get().strip()
+            
         self.current_provider = self.cb_provider.get()
         self.update_ui_for_provider(self.current_provider)
 
@@ -131,9 +150,12 @@ class SettingsDialog(tk.Toplevel):
         api_key = self.ent_key.get().strip()
         if not api_key: return messagebox.showwarning("Napaka", "Najprej vnesi API ključ!")
         self.btn_refresh.config(state=tk.DISABLED, text="Iščem...")
-        threading.Thread(target=self._fetch_models_thread, args=(prov, api_key), daemon=True).start()
+        
+        # Poberemo URL, če je CustomAPI
+        custom_url = self.ent_url.get().strip() if prov == "CustomAPI" else ""
+        threading.Thread(target=self._fetch_models_thread, args=(prov, api_key, custom_url), daemon=True).start()
 
-    def _fetch_models_thread(self, prov, api_key):
+    def _fetch_models_thread(self, prov, api_key, custom_url):
         modeli = []
         try:
             if prov == "Gemini":
@@ -148,12 +170,25 @@ class SettingsDialog(tk.Toplevel):
                     modeli = [m["id"] for m in data.get("data", []) if "gpt" in m["id"]]
             elif prov == "Anthropic":
                 modeli = ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
+            elif prov == "CustomAPI":
+                # Poskusimo poiskati /models glede na vpisani URL
+                if "/chat/completions" in custom_url:
+                    model_url = custom_url.replace("/chat/completions", "/models")
+                else:
+                    model_url = custom_url.rstrip("/") + "/models"
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(model_url, headers={"Authorization": f"Bearer {api_key}"}), timeout=15) as response:
+                        data = json.loads(response.read().decode("utf-8"))
+                        modeli = [m["id"] for m in data.get("data", [])]
+                except:
+                    # Če API ne podpira seznama modelov (ali smo vpisali napačen URL), pustimo prazno, da uporabnik vpiše ročno.
+                    modeli = []
             
             if modeli:
                 modeli.sort()
                 self.cb_model.after(0, lambda: self._update_models_ui(modeli))
             else:
-                self.cb_model.after(0, lambda: messagebox.showinfo("Napaka", "Ni bilo mogoče najti modelov."))
+                self.cb_model.after(0, lambda: messagebox.showinfo("Informacija", "Modelov ni bilo mogoče samodejno najti. Vpišite ime modela ročno! (npr. llama-3.2-90b-vision-preview)"))
         except Exception as e:
             self.cb_model.after(0, lambda err=e: messagebox.showerror("Napaka API", str(err)))
         finally:
@@ -167,10 +202,14 @@ class SettingsDialog(tk.Toplevel):
         prov = self.cb_provider.get().strip()
         self.settings[prov]["api_key"] = self.ent_key.get().strip()
         self.settings[prov]["model"] = self.cb_model.get().strip()
+        if prov == "CustomAPI":
+            self.settings[prov]["base_url"] = self.ent_url.get().strip()
         self.settings["active_provider"] = prov
+        
         if save_settings(self.settings):
             if self.on_save_callback: self.on_save_callback()
             self.destroy()
+
 
 class DownloadSettingsDialog(tk.Toplevel):
     def __init__(self, parent, current_dl_settings, on_save_callback):
@@ -225,6 +264,7 @@ class DownloadSettingsDialog(tk.Toplevel):
             return messagebox.showerror("Napaka vnosov", "Preverite vnose.")
         self.on_save(new_settings)
         self.destroy()
+
 
 class PromptDialog(tk.Toplevel):
     def __init__(self, parent):

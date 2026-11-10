@@ -50,6 +50,8 @@ HEADERS = {
 
 SCHEMA_FIELDS = {
     "KRSTNE": [
+        ("vpis_st_knjige", "zap. št. v knjigi", "INT NOT NULL"),
+        ("vpis_st_na_strani", "zap. št. na strani", "INT NOT NULL"),
         ("zp_st", "zp. št.", "VARCHAR(50)"), ("zupnija", "župnija", "VARCHAR(150)"), 
         ("datum_rojstva", "datum rojstva", "VARCHAR(50)"), ("datum_krsta", "datum krsta", "VARCHAR(50)"), 
         ("naslov", "naslov", "VARCHAR(150)"), ("ime_otroka", "ime otroka", "VARCHAR(150)"), 
@@ -63,6 +65,8 @@ SCHEMA_FIELDS = {
         ("knjiga", "knjiga", "VARCHAR(100)"), ("slika", "slika", "VARCHAR(100)"), ("surovi_tekst", "surovi tekst", "TEXT")
     ],
     "POROCNE": [
+        ("vpis_st_knjige", "zap. št. v knjigi", "INT NOT NULL"),
+        ("vpis_st_na_strani", "zap. št. na strani", "INT NOT NULL"),
         ("zp_st", "zp. št.", "VARCHAR(50)"), ("zupnija", "župnija", "VARCHAR(150)"), ("datum_poroke", "datum poroke", "VARCHAR(50)"), 
         ("naslov_zenina", "naslov ženina", "VARCHAR(150)"), ("naslov_neveste", "naslov neveste", "VARCHAR(150)"),
         ("ime_zenina", "ime ženina", "VARCHAR(150)"), ("priimek_zenina", "priimek ženina", "VARCHAR(150)"), 
@@ -73,6 +77,8 @@ SCHEMA_FIELDS = {
         ("knjiga", "knjiga", "VARCHAR(100)"), ("slika", "slika", "VARCHAR(100)"), ("surovi_tekst", "surovi tekst", "TEXT")
     ],
     "KNJIGE_MRTVIH": [
+        ("vpis_st_knjige", "zap. št. v knjigi", "INT NOT NULL"),
+        ("vpis_st_na_strani", "zap. št. na strani", "INT NOT NULL"),
         ("zp_st", "zp. št.", "VARCHAR(50)"), ("zupnija", "župnija", "VARCHAR(150)"), 
         ("datum_smrti", "datum smrti", "VARCHAR(50)"), ("datum_pokopa", "datum pokopa", "VARCHAR(50)"), ("naslov", "naslov", "VARCHAR(150)"),
         ("ime_pokojnika", "ime pokojnika", "VARCHAR(150)"), ("priimek_pokojnika", "priimek pokojnika", "VARCHAR(150)"), 
@@ -96,7 +102,9 @@ DEFAULT_PROMPT = (
     "Prečrtano: Ohrani in jasno označi popravke.\n\n"
     "2. STRUKTURIRANJE PODATKOV\n"
     "Vsak dogodek je samostojen JSON zapis. Datum normaliziraj v YYYY-MM-DD. "
-    "Če podatek manjka, uporabi null. Ne izmišljaj si podatkov.\n\n"
+    "Če podatek manjka, uporabi null. Ne izmišljaj si podatkov.\n"
+    "Vrstni red zapisov ohrani natančno tako, kot si sledijo v knjigi na sliki "
+    "(od prvega do zadnjega; ne razvrščaj jih po datumu ali priimku).\n\n"
     "3. OBVEZNA IZHODNA STRUKTURA – JSON\n"
     "Rezultat mora biti seznam objektov. Ne uporabljaj markdown oznak ali uvodov. Samo čist JSON array."
 )
@@ -215,7 +223,9 @@ PROMPT_JSON_SCHEMAS = {}
 for book_type, fields in SCHEMA_FIELDS.items():
     ai_fields = [
         field for field in fields
-        if field[0] not in ("zupnija", "knjiga", "slika")
+        if field[0] not in (
+            "zupnija", "knjiga", "slika", "vpis_st_knjige", "vpis_st_na_strani"
+        )
     ]
 
     json_keys = [f'"{field[0]}": null' for field in ai_fields]
@@ -232,7 +242,10 @@ for book_type, fields in SCHEMA_FIELDS.items():
         "- Ne spreminjaj imen ključev.\n"
         "- Ne dodajaj novih ključev.\n"
         "- Ne izpuščaj nobenega ključa.\n"
-        "- Polja zupnija, knjiga in slika izpusti, ker jih določi program.\n"
+        "- Objekte v JSON seznamu vrni v natančnem vrstnem redu vpisov na sliki, "
+        "od prvega do zadnjega; ne razvrščaj po datumu ali priimku.\n"
+        "- Polja zupnija, knjiga, slika, vpis_st_knjige in vpis_st_na_strani "
+        "določi program; ne izmišljaj si jih in jih ne vključuj v JSON.\n"
         "- Vsa polja morajo biti prisotna v vsakem objektu.\n"
         "- Manjkajoče podatke označi z null.\n"
         "- Vse vrednosti morajo biti besedilni nizi ali null.\n"
